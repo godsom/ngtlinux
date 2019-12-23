@@ -1,0 +1,132 @@
+#!/bin/sh
+#
+# Nutanix Guest Tools
+#
+# chkconfig: 2345 12 10
+# description:  Starts, stops Nutanix Guest Agent.
+#
+### BEGIN INIT INFO
+# Provides: ngt_guest_agent
+# Required-Start:
+# Required-Stop:
+# Default-Start: 2 3 4 5
+# Default-Stop: 0 1 6
+# Short-Description: Starts, stops Nutanix Guest Agent.
+# Description: Starts, stops Nutanix Guest Agent.
+### END INIT INFO
+
+
+# Nutanix Guest Agent Location
+NGT_ROOT=/usr/local/nutanix
+NGT_LOGS=$NGT_ROOT/logs
+NGT_BIN=$NGT_ROOT/bin
+DAEMON=$NGT_BIN/guest_agent_monitor_linux.py
+STDOUT=$NGT_LOGS/guest_agent_stdout.log
+ISCSI_CLEANUP_SCRIPT=$NGT_BIN/maybe_cleanup_old_iscsi_targets_linux.py
+
+get_guest_agent_pids() {
+  # Get the pids for NGA monitor and child processes.
+  local pids=`ps -ef | grep '[g]uest_agent_monitor_linux.py' | \
+    awk '{ print $2 }'`
+  echo $pids
+}
+
+start() {
+  # Check if both guest agent monitor and guest agent service are already
+  # running.
+  local pids=`get_guest_agent_pids`
+  local num_pids=`echo $pids | wc -w`
+  if [ $num_pids -eq 2 ]; then
+    echo "Nutanix Guest Agent is already running."
+    return
+  elif [ $num_pids -ne 0 ]; then
+    # If we reach here, due to some error either only montior/child is
+    # running or more instances of child and monitor are running. Kill
+    # them all and continue with start.
+    kill -9 $pids
+  fi
+
+  if [ -e "/usr/bin/python2.7" ]; then
+    python='/usr/bin/python2.7'
+  elif [ -e "/usr/bin/python2.6" ]; then
+    python='/usr/bin/python2.6'
+  else
+    echo "Nutanix Guest Agent failed to start : Python 2.7/2.6 not found"
+    return
+  fi
+
+  cd $NGT_BIN
+  # Cleanup old iSCSI targets if it is a first boot of recovered VM and
+  # it was using volume group as external attachments.
+  $python $ISCSI_CLEANUP_SCRIPT > $STDOUT 2>&1
+
+  echo "Starting Nutanix Guest Agent daemon."
+  $python $DAEMON > $STDOUT 2>&1 &
+}
+
+stop() {
+  local pids=`get_guest_agent_pids`
+  local num_pids=`echo $pids | wc -w`
+  if [ $num_pids -eq 0 ]; then
+    echo "Nutanix Guest Agent is not running."
+    return
+  elif [ $num_pids -eq 2 ]; then
+    # Determine the parent process and kill it with SIGTERM, it will
+    # gracefully stop the child process also.
+    pid1=`echo $pids | cut -d ' ' -f1`
+    pid2=`echo $pids | cut -d ' ' -f2`
+    child_pid=`pgrep -P $pid1`
+    echo "Stopping Nutanix Guest Agent deamon gracefully"
+    if [ ! -z "$child_pid" ]; then
+      # Process with pid1 is the parent shut it down gracefully.
+      kill -15 $pid1
+    else
+      # Process with pid2 is the parent shut it down gracefully.
+      kill -15 $pid2
+    fi
+    sleep 2
+  fi
+
+  # Check if the guest agent service/monitor are still running. If so
+  # kill them forcefully.
+  pids=`get_guest_agent_pids`
+  num_pids=`echo $pids | wc -w`
+  if [ $num_pids -ne 0 ]; then
+    echo "Forcefully killing Guest Agent daemon."
+    kill -9 $pids
+    sleep 2
+  fi
+  echo "Nutanix Guest Agent daemon stopped."
+}
+
+status() {
+  local pids=`get_guest_agent_pids`
+  local num_pids=`echo $pids | wc -w`
+  # Check if both guest agent monitor and guest agent service are running.
+  if [ $num_pids -ne 2 ]; then
+    echo "Nutanix Guest Agent is not running."
+    return
+  fi
+  echo "Nutanix Guest Agent is running."
+}
+
+case "$1" in
+  start)
+    start
+    ;;
+  stop)
+    stop
+    ;;
+  restart)
+    stop
+    start
+    ;;
+  status)
+    status
+    ;;
+  *)
+    echo "Usage: /etc/init.d/ngt_guestagent {start|stop|restart|status}"
+    exit 1
+
+esac
+exit 0
